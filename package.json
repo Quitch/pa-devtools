@@ -1,0 +1,14 @@
+{
+  "name": "pa-devtools",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Extract and serve a Chrome-40-era DevTools frontend for debugging Planetary Annihilation's embedded Coherent UI renderer",
+  "type": "module",
+  "bin": { "pa-devtools": "./pa-devtools.mjs" },
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "node pa-devtools.mjs build",
+    "serve": "node pa-devtools.mjs serve",
+    "doctor": "node pa-devtools.mjs doctor"
+  }
+}
