@@ -72,24 +72,77 @@ and reading back the loaded frontend: 1 target attached, all 8 panels built
 elements in the page, Console panel 1249x1259 with **141 message rows** of live
 PA output, and **zero errors** in the frontend's own console.
 
-## Usage
+## Installing
 
-```bash
-node pa-devtools.mjs build     # download snapshot, extract, verify (~78 MB, once)
-node pa-devtools.mjs serve     # serve it, list PA's debuggable pages
-node pa-devtools.mjs browser   # launch an era-matched Chromium to view it in
-node pa-devtools.mjs doctor    # is PA's debug port up? is the frontend present?
-```
+Do this once. It downloads roughly 170 MB in total, all cached under `.cache/`
+so it never repeats.
 
-Launch PA **with `--coherent_port=9999`** — the debug port is opt-in per launch,
-so a refused connection usually means a missing argument rather than a closed
-game. Then run `serve` and `browser`, and click a page in the list.
+1. **Check Node.** Needs 18 or newer; there are no other dependencies.
 
-`--coherent_port` is a PA argument, not a Windows mechanism, so it works
-unchanged on Linux and macOS.
+   ```bash
+   node --version
+   ```
 
-Useful flags: `--port`, `--pa-host`, `--pa-port`, `--out`, `--dir`,
-`--debug-port` (gives the viewer its own CDP port, to debug the debugger).
+2. **Build the frontend.** Downloads a Chromium 40 snapshot (~78 MB), extracts
+   95 files from its `resources.pak`, and verifies every internal reference
+   resolves. Output lands in `front_end/`.
+
+   ```bash
+   node pa-devtools.mjs build
+   ```
+
+3. **Fetch the viewer browser.** First run downloads an era-matched Chromium
+   (~91 MB) and launches it — close the window once it appears. Every later run
+   starts instantly from cache. This step is not optional; see
+   [You cannot view this in a modern browser](#you-cannot-view-this-in-a-modern-browser).
+
+   ```bash
+   node pa-devtools.mjs browser
+   ```
+
+## Using
+
+Do this each debugging session.
+
+1. **Launch PA with the debug port.** It is opt-in per launch, so a refused
+   connection almost always means a missing argument rather than a closed game.
+   `--coherent_port` is a PA argument, not a Windows mechanism, so it works
+   unchanged on Linux and macOS.
+
+   ```text
+   PA.exe --coherent_port=9999
+   ```
+
+2. **Navigate PA to the scene you want to inspect.** Targets appear only once
+   you are actually in them — GW scenes (`gw_start`, `gw_play`, `gw_war_over`,
+   `gw_coop_per_player_loadout`) won't be listed from the main menu.
+
+3. **Start the server** and leave it running.
+
+   ```bash
+   node pa-devtools.mjs serve
+   ```
+
+4. **Launch the viewer**, which opens on the target list. Same command as
+   install step 3, but instant now that it's cached.
+
+   ```bash
+   node pa-devtools.mjs browser
+   ```
+
+5. **Click the page you want to debug.** Greyed-out entries are already being
+   inspected — only one client may attach to a target at a time.
+
+6. **Reload the list whenever PA changes scene.** Target ids are regenerated on
+   every navigation, so a `?ws=` URL from an earlier scene is stale. Go back to
+   <http://127.0.0.1:8099/> rather than bookmarking one.
+
+If something looks wrong, `node pa-devtools.mjs doctor` reports whether PA's
+debug port is answering and whether the frontend is present.
+
+Useful flags: `--port`, `--pa-host`, `--pa-port`, `--out`, `--dir`, and
+`--debug-port` (gives the viewer its own CDP port, so you can attach to it and
+debug the debugger — the fastest way to diagnose a frontend problem).
 
 ### You cannot view this in a modern browser
 
@@ -98,10 +151,10 @@ current engine has removed:
 
 | API | Uses | Status |
 | --- | --- | --- |
-| `::shadow` / `/deep/` CSS combinators | 98 | Removed Chrome 63; never in Firefox |
+| `::shadow` / `/deep/` CSS | 98 | Removed Chrome 63; never in Firefox |
 | `createShadowRoot` (Shadow DOM v0) | 2 | Removed Chrome 80; never in Firefox |
 | `KeyboardEvent.keyIdentifier` | 74 | Removed Chrome 54; never in Firefox |
-| `SharedWorker` temp storage cleaner | 9 | Fails → `Failed to clear temp storage` |
+| `SharedWorker` temp storage | 9 | Fails → `Failed to clear temp storage` |
 
 Panel content lives inside shadow roots styled through those combinators, so a
 modern browser paints the tab bar and drops everything beneath it. That is the
@@ -127,10 +180,6 @@ to be pointed at `127.0.0.1`. Don't browse the web with it.
 
 macOS caveat: a 2014 unsigned x86-64 app will likely need Rosetta and a
 Gatekeeper exception. Untested there.
-
-Target ids change on every navigation, so re-fetch the root page (rather than
-bookmarking a `?ws=` URL) after PA changes scene. GW scenes only appear in the
-target list once you're actually in them.
 
 ## What gets extracted
 
@@ -186,9 +235,9 @@ return HTTP 200 through the bundled server.
 ## Layout
 
 ```text
-pa-devtools.mjs        CLI: build | extract | serve | doctor
+pa-devtools.mjs        CLI: build | extract | serve | browser | doctor
 lib/pak.mjs            Chromium DataPack v4/v5 reader
-lib/zip.mjs            minimal zip reader (no deps; unzip/Expand-Archive aren't portable)
+lib/zip.mjs            minimal zip reader (unzip/Expand-Archive aren't portable)
 lib/snapshot.mjs       snapshot resolution + download, with caching
 lib/extract.mjs        name recovery + reference-closure verification
 manifests/303346.json  learned id -> name map for Chrome 40
