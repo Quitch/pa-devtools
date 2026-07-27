@@ -21,8 +21,19 @@ the era-matched one and serves it from your own machine.
 
 ### It really is the right era
 
-The frontend's declared protocol surface was diffed against the literals
-compiled into `CoherentUI_Host.exe`:
+PA's own `/json/version` reports:
+
+```text
+"User-Agent": "... Chrome/40.0.2214.28 Safari/537.36"
+"WebKit-Version": "537.36 (@5994603edf160b2d21296cfe70499b12dae8301a)"
+"Protocol-Version": "1.1"
+```
+
+Snapshot 303346 *is* Chrome 40.0.2214's branch base — an exact match to the
+build PA embeds.
+
+The frontend's declared protocol surface, diffed against the literals compiled
+into `CoherentUI_Host.exe`:
 
 | | frontend declares | found in Coherent host |
 | --- | --- | --- |
@@ -34,24 +45,88 @@ Every command matches. The single missing event is
 lines. All 26 domains — `DOM`, `CSS`, `Debugger`, `Runtime`, `Network`,
 `Timeline`, `Profiler`, `Page`, … — are fully covered.
 
+### Validated against a live PA session
+
+Confirmed 2026-07-27 against a running client. The `ws://` upgrade succeeds,
+and every bootstrap call the frontend's panels make on attach returns a result:
+
+```text
+Inspector/Page/Runtime/Console/Network/Debugger/DOM/CSS/DOMStorage/Database/
+IndexedDB/Profiler/HeapProfiler/Timeline/LayerTree/Worker/ApplicationCache .enable
+                                                          -> 18 ok, 0 failed
+DOM.getDocument            -> #document, 2 children, coui://ui/main/main.html
+Page.getResourceTree       -> frame coui://ui/main/main.html, 9 resources
+Runtime.evaluate           -> model/ko/api all reachable, wasThrown=false
+CSS.getComputedStyleForNode-> 263 properties on <body>, 6 matched rules
+DOM.getOuterHTML           -> 2425 chars
+```
+
+99 events streamed while attached — `Console.messageAdded` x70,
+`Debugger.scriptParsed` x12, `Network.*`, `CSS.styleSheetAdded`,
+`LayerTree.layerTreeDidChange`. PA stayed healthy throughout and all 5 targets
+remained listed afterwards.
+
+Rendering was then confirmed too, by driving an era-matched Chromium's own CDP
+and reading back the loaded frontend: 1 target attached, all 8 panels built
+(`elements,network,sources,timeline,profiles,resources,audits,console`), 546
+elements in the page, Console panel 1249x1259 with **141 message rows** of live
+PA output, and **zero errors** in the frontend's own console.
+
 ## Usage
 
 ```bash
 node pa-devtools.mjs build     # download snapshot, extract, verify (~78 MB, once)
 node pa-devtools.mjs serve     # serve it, list PA's debuggable pages
+node pa-devtools.mjs browser   # launch an era-matched Chromium to view it in
 node pa-devtools.mjs doctor    # is PA's debug port up? is the frontend present?
 ```
 
 Launch PA **with `--coherent_port=9999`** — the debug port is opt-in per launch,
 so a refused connection usually means a missing argument rather than a closed
-game. Then open <http://127.0.0.1:8099/> and click a page. The root page lists
-every target PA reports on `:9999` and links each one to the frontend with the
-right `?ws=` parameter attached.
+game. Then run `serve` and `browser`, and click a page in the list.
 
 `--coherent_port` is a PA argument, not a Windows mechanism, so it works
 unchanged on Linux and macOS.
 
-Useful flags: `--port`, `--pa-host`, `--pa-port`, `--out`, `--dir`.
+Useful flags: `--port`, `--pa-host`, `--pa-port`, `--out`, `--dir`,
+`--debug-port` (gives the viewer its own CDP port, to debug the debugger).
+
+### You cannot view this in a modern browser
+
+Not a limitation of the extraction — the 2014 frontend depends on APIs every
+current engine has removed:
+
+| API | Uses | Status |
+| --- | --- | --- |
+| `::shadow` / `/deep/` CSS combinators | 98 | Removed Chrome 63; never in Firefox |
+| `createShadowRoot` (Shadow DOM v0) | 2 | Removed Chrome 80; never in Firefox |
+| `KeyboardEvent.keyIdentifier` | 74 | Removed Chrome 54; never in Firefox |
+| `SharedWorker` temp storage cleaner | 9 | Fails → `Failed to clear temp storage` |
+
+Panel content lives inside shadow roots styled through those combinators, so a
+modern browser paints the tab bar and drops everything beneath it. That is the
+exact symptom to expect, and there is no shim worth trusting across 4 MB of
+minified code.
+
+`browser` solves it by running the frontend in the browser it shipped with:
+
+| Host | Snapshot | Build |
+| --- | --- | --- |
+| Windows | `Win/303348` | Chrome 40.0.2214.0 (verified on Windows 11) |
+| Linux | `Linux_x64/303346` | Chrome 40.0.2214 |
+| macOS | `Mac/303350` | Chrome 40.0.2214 |
+
+The viewer only has to predate the removals above, so anything from roughly
+Chrome 28 to Chrome 53 works — pass `--position` if you want a different one.
+A newer pick in that range may behave better on a modern OS.
+
+**Security:** this is an unpatched 2014 Chromium with known, unfixed
+vulnerabilities. It launches with an isolated `--user-data-dir` and background
+networking, sync, extensions and component updates disabled, and is only meant
+to be pointed at `127.0.0.1`. Don't browse the web with it.
+
+macOS caveat: a 2014 unsigned x86-64 app will likely need Rosetta and a
+Gatekeeper exception. Untested there.
 
 Target ids change on every navigation, so re-fetch the root page (rather than
 bookmarking a `?ws=` URL) after PA changes scene. GW scenes only appear in the
@@ -123,9 +198,9 @@ front_end/             generated output (gitignored)
 
 ## Caveats
 
-- **Not yet validated against a live PA session.** The protocol-surface match
-  above is a static analysis of the shipped binary; it is strong evidence but
-  not a substitute for attaching to a running game.
+- Coherent UI is a *fork*. The live handshake above covers the calls the frontend
+  makes on attach, but anything it changed behind an identical method name deeper
+  into a panel's use won't show up in either that or a string diff.
 - **Don't point a modern DevTools frontend at PA.** Current Edge/Chrome can't
   complete the WebSocket upgrade against this backend — PA logs
   `GetMimeType doesn't know mime type for: page/<id>` and the Coherent UI host
@@ -133,11 +208,14 @@ front_end/             generated output (gitignored)
   game keeps running (symptom: PA alive, connection refused; fix: restart PA).
   `chrome://inspect` also rejects the target, since `/json/version` reports
   protocol 1.1 against a modern expectation of 1.3. Avoiding exactly this is the
-  reason for era-matching the frontend. Note the frontend here is Chrome-40-era
-  but still *runs in* your modern browser, which is fine — it opens the socket
-  itself as a proper `ws://` upgrade from JS.
-- Coherent UI is a *fork*. Anything it changed behind an identical method name
-  won't show up in a string diff.
+  reason for era-matching the frontend.
+- The `?ws=` parameter must **not** be percent-encoded. The M40 frontend reads it
+  verbatim and prepends `ws://` without decoding, so an encoded `:` or `/` gives
+  `Failed to construct 'WebSocket': The URL ... is invalid` and the UI loads but
+  never connects. PA's own `devtoolsFrontendUrl` passes it raw for this reason.
+- Only one client may attach to a target at a time. While one is attached the
+  backend **omits** `webSocketDebuggerUrl` and `devtoolsFrontendUrl` from
+  `/json` for that target; `serve` uses that absence to flag it as busy.
 - `SupportedCSSProperties.js` and `InspectorBackendCommands.js` exist loose in
   the snapshot but are absent from the pak. That's expected: release builds
   inline both into `devtools.js` (which carries 259 `registerCommand` calls),

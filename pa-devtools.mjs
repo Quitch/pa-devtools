@@ -261,9 +261,22 @@ async function cmdServe(o) {
           ? pages
               .map((t) => {
                 const ws = wsParamFor(t, paHost, paPort);
-                const href = `/devtools.html?ws=${encodeURIComponent(ws)}`;
-                return `<li><a href="${escapeHtml(href)}">${escapeHtml(t.title || t.id)}</a>` +
-                  `<div class="u">${escapeHtml(t.url || "")}</div></li>`;
+                // Deliberately NOT percent-encoded: the M40 frontend reads this
+                // parameter verbatim and prepends "ws://" without decoding it,
+                // so an encoded ":" or "/" yields an invalid WebSocket URL.
+                // PA's own devtoolsFrontendUrl passes it raw for the same reason.
+                const href = `/devtools.html?ws=${ws}`;
+                // The backend drops webSocketDebuggerUrl while a client is
+                // attached, and only allows one at a time - so that absence is
+                // how we know a target is already being inspected.
+                const busy = !t.webSocketDebuggerUrl;
+                const note = busy
+                  ? `<div class="b">already being inspected - close the other DevTools ` +
+                    `window first, or this link won't attach</div>`
+                  : "";
+                return `<li><a class="${busy ? "busy" : ""}" href="${escapeHtml(href)}">` +
+                  `${escapeHtml(t.title || t.id)}</a>` +
+                  `<div class="u">${escapeHtml(t.url || "")}</div>${note}</li>`;
               })
               .join("")
           : `<li>PA is up on ${paHost}:${paPort} but reports no debuggable pages.</li>`;
@@ -276,7 +289,9 @@ async function cmdServe(o) {
         `<!doctype html><meta charset="utf-8"><title>PA DevTools</title>` +
         `<style>body{font:14px/1.5 system-ui,sans-serif;margin:2rem;max-width:60rem}` +
         `li{margin:.6rem 0}.u{color:#777;font-size:12px;word-break:break-all}` +
-        `@media(prefers-color-scheme:dark){body{background:#1b1b1b;color:#eee}a{color:#7ab7ff}.u{color:#999}}</style>` +
+        `.b{color:#b06000;font-size:12px}a.busy{opacity:.55}` +
+        `@media(prefers-color-scheme:dark){body{background:#1b1b1b;color:#eee}a{color:#7ab7ff}` +
+        `.u{color:#999}.b{color:#e0a24a}}</style>` +
         `<h1>PA DevTools</h1><p>Chrome-40-era frontend, serving from <code>${escapeHtml(dir)}</code>.</p>` +
         `<ul>${body}</ul><p><a href="/">refresh</a></p>`;
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
@@ -306,6 +321,102 @@ async function cmdServe(o) {
     console.log(`  open  http://127.0.0.1:${port}/`);
     console.log(`  PA debug port expected at ${paHost}:${paPort}`);
   });
+}
+
+// --- browser -------------------------------------------------------------
+//
+// The extracted frontend is from 2014 and depends on APIs every current
+// browser has since removed: Shadow DOM v0 (`createShadowRoot`), the `::shadow`
+// and `/deep/` CSS combinators (98 uses), and `KeyboardEvent.keyIdentifier`
+// (74 uses). Panel content lives inside shadow roots styled through those
+// combinators, so a modern engine paints the frame and drops the contents.
+//
+// There is no shim worth trusting for that. The frontend is instead run in the
+// browser it shipped with - an era-matched Chromium snapshot for the host OS.
+
+const VIEWER = {
+  win32: { platform: "Win", position: 303348, exe: "chrome-win32/chrome.exe" },
+  linux: { platform: "Linux_x64", position: 303346, exe: "chrome-linux/chrome" },
+  darwin: {
+    platform: "Mac",
+    position: 303350,
+    exe: "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+  },
+};
+
+function unpackZip(zipBuf, destDir) {
+  const index = readZipIndex(zipBuf);
+  mkdirSync(destDir, { recursive: true });
+  for (const [name, entry] of index) {
+    const target = join(destDir, name);
+    if (!resolve(target).startsWith(resolve(destDir))) continue; // zip-slip guard
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, readZipEntry(zipBuf, entry));
+  }
+  return index.size;
+}
+
+async function cmdBrowser(o) {
+  const spec = VIEWER[process.platform];
+  if (!spec) throw new Error(`no era-matched Chromium mapping for ${process.platform}`);
+
+  const platform = o.platform || spec.platform;
+  const position = Number(o.position || spec.position);
+  const cacheDir = resolve(o.cache || join(HERE, ".cache"));
+  const browserDir = join(cacheDir, `browser-${platform}-${position}`);
+  const exe = join(browserDir, o.exe || spec.exe);
+
+  if (!existsSync(exe)) {
+    console.log(`fetching era-matched Chromium (${platform} ${position})`);
+    const zipBuf = await downloadZip(platform, position, cacheDir, (m) => console.log(m));
+    console.log(`unpacking to ${browserDir} ...`);
+    const n = unpackZip(zipBuf, browserDir);
+    console.log(`unpacked ${n} files`);
+    if (process.platform !== "win32") {
+      const { chmodSync } = await import("node:fs");
+      try {
+        chmodSync(exe, 0o755);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+  if (!existsSync(exe)) throw new Error(`browser executable not found at ${exe}`);
+
+  const url = o.url || `http://127.0.0.1:${Number(o.port || DEFAULT_SERVE_PORT)}/`;
+  const profile = join(cacheDir, "browser-profile");
+
+  const flags = [
+    `--user-data-dir=${profile}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-background-networking",
+    "--disable-component-update",
+    "--disable-default-apps",
+    "--disable-extensions",
+    "--disable-sync",
+    "--disable-translate",
+    "--safebrowsing-disable-auto-update",
+    "--metrics-recording-only",
+    "--no-pings",
+  ];
+  // Lets you debug the debugger: attach to this Chromium's own CDP to inspect
+  // the DevTools frontend it is displaying.
+  if (o["debug-port"]) flags.push(`--remote-debugging-port=${Number(o["debug-port"])}`);
+  if (o["no-sandbox"]) flags.push("--no-sandbox");
+  if (o.app) flags.push(`--app=${url}`);
+  else flags.push(url);
+
+  console.log(`\n!  This is an unpatched 2014 Chromium with known, unfixed security`);
+  console.log(`!  vulnerabilities. It is launched with an isolated profile and is only`);
+  console.log(`!  meant to point at 127.0.0.1. Do not browse the web with it.\n`);
+  console.log(`launching ${exe}`);
+  console.log(`   -> ${url}`);
+
+  const { spawn } = await import("node:child_process");
+  const child = spawn(exe, flags, { detached: true, stdio: "ignore" });
+  child.unref();
+  console.log(`\nlaunched (pid ${child.pid}). Close the window when you're done.`);
 }
 
 // --- doctor --------------------------------------------------------------
@@ -370,13 +481,24 @@ const USAGE = `pa-devtools - Chrome-40-era DevTools frontend for debugging Plane
   serve     [--port 8099] [--pa-host 127.0.0.1] [--pa-port 9999] [--dir DIR]
             Serve the frontend and list PA's debuggable pages as links.
 
+  browser   [--position N] [--url URL] [--app] [--no-sandbox]
+            Launch an era-matched Chromium to view the frontend in. Required:
+            the 2014 frontend uses Shadow DOM v0, ::shadow and /deep/, which no
+            current browser still supports, so panels render blank in one.
+
   doctor    [--pa-host 127.0.0.1] [--pa-port 9999] [--dir DIR]
             Report whether PA's debug port and the extracted frontend are usable.
 `;
 
 const o = args(process.argv.slice(2));
 const cmd = o._[0];
-const commands = { build: cmdBuild, extract: cmdExtract, serve: cmdServe, doctor: cmdDoctor };
+const commands = {
+  build: cmdBuild,
+  extract: cmdExtract,
+  serve: cmdServe,
+  browser: cmdBrowser,
+  doctor: cmdDoctor,
+};
 
 if (!cmd || !commands[cmd]) {
   console.log(USAGE);
