@@ -498,20 +498,23 @@ async function cmdDoctor(o) {
   const port = Number(o["pa-port"] || DEFAULT_PA_PORT);
   console.log(`probing PA debug port at ${host}:${port}`);
 
-  let reachable = false;
-  for (const path of ["/json/version", "/json"]) {
+  const probe = async (path) => {
     try {
       const res = await fetch(`http://${host}:${port}${path}`, {
         signal: AbortSignal.timeout(4000),
       });
       const text = await res.text();
-      reachable = true;
-      console.log(`\nGET ${path} -> HTTP ${res.status}`);
-      console.log(text.slice(0, 1500));
+      return { path, ok: true, line: `HTTP ${res.status}`, text: text.slice(0, 1500) };
     } catch (e) {
-      console.log(`\nGET ${path} -> ${e.message}`);
+      return { path, ok: false, line: e.message };
     }
+  };
+  const probes = await Promise.all(["/json/version", "/json"].map(probe));
+  for (const p of probes) {
+    console.log(`\nGET ${p.path} -> ${p.line}`);
+    if (p.ok) console.log(p.text);
   }
+  const reachable = probes.some((p) => p.ok);
   if (!reachable) {
     console.log(
       `\nNothing is listening on ${host}:${port}. The port is opt-in per launch:\n` +
