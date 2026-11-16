@@ -6,9 +6,45 @@ extracted from a Chromium snapshot's `resources.pak`.
 Pure Node, no dependencies, no shelling out to platform tools — the same
 commands work on Windows, Linux and macOS.
 
+**This tool is for PA's Coherent UI backend only.** Since build 124720
+(2026-11-15) PA renders its UI with CEF (Chromium 150) by default, and a
+current Chrome or Edge debugs that with no extra tooling — see
+[Debugging the CEF backend](#debugging-the-cef-backend). Coherent stays
+selectable with `--ui-backend=coherent` until it is dropped, and this tool
+is retired with it.
+
+## Debugging the CEF backend
+
+1. **Launch PA with the debug port**: `PA.exe --webview-port=9999`.
+   `--coherent_port` still works as a deprecated alias.
+2. **In Chrome or Edge, open `chrome://inspect`** (`edge://inspect` in Edge).
+3. **Click Configure… and add `127.0.0.1:9999`.** The browser remembers it.
+4. **Click _inspect_ under the page you want.** PA's scenes are listed under
+   Remote Target once you are in them, the same as on Coherent.
+
+The inspect page is the only route that works out of the box. Each of these
+gets HTTP 403 on the WebSocket, checked against build 124720:
+
+- the frontend PA's debug port serves itself, at `/devtools/inspector.html`
+- a browser's built-in `devtools://devtools/bundled/inspector.html?ws=…`
+- presumably the hosted `devtoolsFrontendUrl` that `/json` reports
+  (inconclusive when tested)
+
+Chromium refuses a debugger WebSocket from any web page whose `Origin` is not
+allowed by `--remote-allow-origins`, and PA has no way to pass that switch to
+CEF. The inspect page connects from inside the browser rather than from a
+page, so it sends no `Origin` and is not refused.
+
+The old warnings about Coherent don't apply to CEF. A modern frontend is the
+right one, `chrome://inspect` is safe, and the debug port answers protocol
+1.3.
+
+`node pa-devtools.mjs doctor` reports which backend is on the port, and
+`serve` shows these steps instead of a target list when it finds CEF.
+
 ## Why this exists
 
-PA's UI runs in Coherent UI 2.6.8, a Chromium fork. Its host process
+PA's legacy UI backend is Coherent UI 2.6.8, a Chromium fork. Its host process
 (`bin_x64/host/CoherentUI_Host.exe`) contains the standard Chromium
 `devtools_http_handler_impl` and exposes the DevTools protocol on
 `127.0.0.1:9999` — but ships **no** DevTools frontend. `bin_x64/host/` has
@@ -104,14 +140,20 @@ so it never repeats.
 
 Do this each debugging session.
 
-1. **Launch PA with the debug port.** It is opt-in per launch, so a refused
-   connection almost always means a missing argument rather than a closed game.
-   `--coherent_port` is a PA argument, not a Windows mechanism, so it works
-   unchanged on Linux and macOS.
+1. **Launch PA on Coherent with the debug port.** CEF is the default, so the
+   backend has to be asked for. The port is opt-in per launch, so a refused
+   connection almost always means a missing argument rather than a closed
+   game. Both are PA arguments, not a Windows mechanism, so they work
+   unchanged on Linux and macOS. `--coherent_port` is the deprecated alias of
+   `--webview-port`.
 
    ```text
-   PA.exe --coherent_port=9999
+   PA.exe --ui-backend=coherent --webview-port=9999
    ```
+
+   Run Coherent on its own profile (`--localstorageurl=<name>` or
+   `--userdatadir=<dir>`). Switching one profile between backends has been
+   seen to break PA's Coherent-to-CEF storage migration.
 
 2. **Navigate PA to the scene you want to inspect.** Targets appear only once
    you are actually in them — GW scenes (`gw_start`, `gw_play`, `gw_war_over`,
@@ -138,7 +180,8 @@ Do this each debugging session.
    <http://127.0.0.1:8099/> rather than bookmarking one.
 
 If something looks wrong, `node pa-devtools.mjs doctor` reports whether PA's
-debug port is answering and whether the frontend is present.
+debug port is answering, which UI backend is behind it, and whether the
+frontend is present.
 
 Useful flags: `--port`, `--pa-host`, `--pa-port`, `--out`, `--dir`, and
 `--debug-port` (gives the viewer its own CDP port, so you can attach to it and
@@ -250,7 +293,8 @@ front_end/             generated output (gitignored)
 - Coherent UI is a *fork*. The live handshake above covers the calls the frontend
   makes on attach, but anything it changed behind an identical method name deeper
   into a panel's use won't show up in either that or a string diff.
-- **Don't point a modern DevTools frontend at PA.** Current Edge/Chrome can't
+- **Don't point a modern DevTools frontend at PA on Coherent.** (On CEF it is
+  the right tool; see above.) Current Edge/Chrome can't
   complete the WebSocket upgrade against this backend — PA logs
   `GetMimeType doesn't know mime type for: page/<id>` and the Coherent UI host
   process has been observed crashing shortly after, killing port 9999 while the
