@@ -2,6 +2,10 @@
 // pa-devtools - build and serve a Chrome-40-era DevTools frontend for
 // debugging Planetary Annihilation's embedded Coherent UI renderer.
 //
+// Coherent only. Since build 124720 PA defaults to CEF (Chromium 150), which a
+// stock Chrome or Edge debugs through its chrome://inspect page; serve and
+// doctor detect a CEF backend and say so instead of offering links that fail.
+//
 //   node pa-devtools.mjs build        download a snapshot, extract, verify
 //   node pa-devtools.mjs extract      extract from a resources.pak you supply
 //   node pa-devtools.mjs serve        serve the frontend, list PA's targets
@@ -225,6 +229,81 @@ async function paTargets(host, port) {
   return res.json();
 }
 
+// Coherent UI 2.6.8 reports Chrome/40 and protocol 1.1. Anything from Chrome 54
+// on has dropped the APIs the M40 frontend needs, so it can't be driven by it.
+const MODERN_CHROME = 54;
+
+async function paBackend(host, port) {
+  const res = await fetch(`http://${host}:${port}/json/version`, {
+    signal: AbortSignal.timeout(4000),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const v = await res.json();
+  const ua = v.Browser || v["User-Agent"] || "";
+  const major = Number(/Chrome\/(\d+)/.exec(ua)?.[1] || 0);
+  return {
+    modern: major >= MODERN_CHROME,
+    browser: v.Browser || (major ? `Chrome/${major}` : "unknown"),
+    protocol: v["Protocol-Version"] || "unknown",
+  };
+}
+
+function cefHelp(host, port) {
+  return {
+    lead: "PA is running the CEF UI backend, which this tool does not serve. Use a current Chrome or Edge instead:",
+    steps: [
+      "open chrome://inspect (edge://inspect in Edge)",
+      `click Configure... and add ${host}:${port}`,
+      'click "inspect" under the page you want',
+    ],
+    note:
+      "Opening a frontend URL directly does not work: the backend rejects any page's " +
+      "WebSocket by Origin (403). To debug Coherent instead, relaunch PA with --ui-backend=coherent.",
+  };
+}
+
+function cefHelpText(host, port) {
+  const { lead, steps, note } = cefHelp(host, port);
+  return [lead, ...steps.map((s, i) => `  ${i + 1}. ${s}`), note].join("\n");
+}
+
+function cefHelpHtml(host, port, browser) {
+  const { lead, steps, note } = cefHelp(host, port);
+  const items = steps.map((s) => "<li>" + escapeHtml(s) + "</li>").join("");
+  return (
+    `<li>${escapeHtml(lead)}<div class="u">${escapeHtml(browser)}</div>` +
+    `<ol>${items}</ol><div class="u">${escapeHtml(note)}</div></li>`
+  );
+}
+
+function targetListHtml(targets, host, port) {
+  const pages = targets.filter((t) => !t.type || t.type === "page");
+  if (!pages.length) {
+    return `<li>PA is up on ${host}:${port} but reports no debuggable pages.</li>`;
+  }
+  return pages
+    .map((t) => {
+      const ws = wsParamFor(t, host, port);
+      // Deliberately NOT percent-encoded: the M40 frontend reads this
+      // parameter verbatim and prepends "ws://" without decoding it,
+      // so an encoded ":" or "/" yields an invalid WebSocket URL.
+      // PA's own devtoolsFrontendUrl passes it raw for the same reason.
+      const href = `/devtools.html?ws=${ws}`;
+      // The backend drops webSocketDebuggerUrl while a client is
+      // attached, and only allows one at a time - so that absence is
+      // how we know a target is already being inspected.
+      const busy = !t.webSocketDebuggerUrl;
+      const note = busy
+        ? `<div class="b">already being inspected - close the other DevTools ` +
+          `window first, or this link won't attach</div>`
+        : "";
+      return `<li><a class="${busy ? "busy" : ""}" href="${escapeHtml(href)}">` +
+        `${escapeHtml(t.title || t.id)}</a>` +
+        `<div class="u">${escapeHtml(t.url || "")}</div>${note}</li>`;
+    })
+    .join("");
+}
+
 function wsParamFor(target, host, port) {
   // Prefer what the backend reports; fall back to the conventional path so a
   // fork that omits webSocketDebuggerUrl still works.
@@ -255,35 +334,15 @@ async function cmdServe(o) {
     if (url.pathname === "/") {
       let body;
       try {
-        const targets = await paTargets(paHost, paPort);
-        const pages = targets.filter((t) => !t.type || t.type === "page");
-        body = pages.length
-          ? pages
-              .map((t) => {
-                const ws = wsParamFor(t, paHost, paPort);
-                // Deliberately NOT percent-encoded: the M40 frontend reads this
-                // parameter verbatim and prepends "ws://" without decoding it,
-                // so an encoded ":" or "/" yields an invalid WebSocket URL.
-                // PA's own devtoolsFrontendUrl passes it raw for the same reason.
-                const href = `/devtools.html?ws=${ws}`;
-                // The backend drops webSocketDebuggerUrl while a client is
-                // attached, and only allows one at a time - so that absence is
-                // how we know a target is already being inspected.
-                const busy = !t.webSocketDebuggerUrl;
-                const note = busy
-                  ? `<div class="b">already being inspected - close the other DevTools ` +
-                    `window first, or this link won't attach</div>`
-                  : "";
-                return `<li><a class="${busy ? "busy" : ""}" href="${escapeHtml(href)}">` +
-                  `${escapeHtml(t.title || t.id)}</a>` +
-                  `<div class="u">${escapeHtml(t.url || "")}</div>${note}</li>`;
-              })
-              .join("")
-          : `<li>PA is up on ${paHost}:${paPort} but reports no debuggable pages.</li>`;
+        const backend = await paBackend(paHost, paPort);
+        body = backend.modern
+          ? cefHelpHtml(paHost, paPort, backend.browser)
+          : targetListHtml(await paTargets(paHost, paPort), paHost, paPort);
       } catch (e) {
         body =
           `<li>Cannot reach PA's debug port at ${paHost}:${paPort} (${escapeHtml(e.message)}).` +
-          `<div class="u">Launch PA, then reload this page.</div></li>`;
+          `<div class="u">Launch PA with --ui-backend=coherent --webview-port=${paPort}, ` +
+          `then reload this page.</div></li>`;
       }
       const html =
         `<!doctype html><meta charset="utf-8"><title>PA DevTools</title>` +
@@ -421,6 +480,19 @@ async function cmdBrowser(o) {
 
 // --- doctor --------------------------------------------------------------
 
+async function reportBackend(host, port) {
+  const backend = await paBackend(host, port).catch((e) => ({ error: e.message }));
+  if (backend.error) {
+    console.log(`\nbackend: unknown (${backend.error})`);
+  } else {
+    console.log(
+      `\nbackend: ${backend.modern ? "CEF" : "Coherent UI"} ` +
+        `(${backend.browser}, protocol ${backend.protocol})`,
+    );
+    if (backend.modern) console.log(cefHelpText(host, port));
+  }
+}
+
 async function cmdDoctor(o) {
   const host = o["pa-host"] || "127.0.0.1";
   const port = Number(o["pa-port"] || DEFAULT_PA_PORT);
@@ -443,10 +515,13 @@ async function cmdDoctor(o) {
   if (!reachable) {
     console.log(
       `\nNothing is listening on ${host}:${port}. The port is opt-in per launch:\n` +
-        `start PA with --coherent_port=${port}, navigate to the scene you want to\n` +
-        `inspect, then re-run. A refused port usually means PA was launched without\n` +
-        `that argument rather than that the game is closed.`,
+        `start PA with --webview-port=${port} (plus --ui-backend=coherent to use this\n` +
+        `tool's frontend), navigate to the scene you want to inspect, then re-run.\n` +
+        `A refused port usually means PA was launched without that argument rather\n` +
+        `than that the game is closed.`,
     );
+  } else {
+    await reportBackend(host, port);
   }
 
   const dir = resolve(o.dir || join(HERE, "front_end"));
@@ -469,6 +544,9 @@ async function cmdDoctor(o) {
 // --- entry ---------------------------------------------------------------
 
 const USAGE = `pa-devtools - Chrome-40-era DevTools frontend for debugging Planetary Annihilation
+
+  For PA's Coherent UI backend (--ui-backend=coherent) only. On the default CEF
+  backend, use chrome://inspect in a current Chrome or Edge; doctor explains.
 
   build     [--platform Linux_x64] [--position 303346] [--out DIR] [--cache DIR]
             Download a Chromium snapshot, extract the DevTools frontend from its
